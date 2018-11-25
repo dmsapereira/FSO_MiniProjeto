@@ -189,20 +189,50 @@ int readFileEntry(char *name, uint16_t ext, struct fs_dirent *ent) {
  * return: idx used/allocated, -1 if error (no space in directory)
  */
 int writeFileEntry(int idx, struct fs_dirent entry) {
-
-    // TODO: (if needed)
-
-    // update dirent idx or allocate a new one
-    // and write to directory on disk
-
-    // notice: directory may need to grow!!
-
-
-    return idx;
+    union fs_block block;
+    //If we want to create a new Dirent
+    if(idx==-1){
+        int dir=0;
+        union fs_block *directory;
+        //Iterates de directories
+        for(;dir<MAXDIRSZ;dir++){
+            if(superB.dir[dir]==0)
+                break;
+            disk_read(superB.dir[dir],block.data);
+            //Iterates the Dirents in the Directories looking for a free one
+            for(int blk=0;blk<DIRENTS_PER_BLOCK;blk++){
+                if(block.dirent[blk].st==TEMPTY) {
+                    block.dirent[blk] = entry;
+                    disk_write(superB.dir[dir],block.data);
+                    return dir*DIRENTS_PER_BLOCK+blk;
+                }
+            }
+        }
+        //If it reaches this point, it means everything is full. Time to create a new Directory!
+        directory=malloc(sizeof(union fs_block));
+        directory->dirent[0]=entry;
+        superB.dir[dir]= (uint16_t) allocBlock();
+        disk_write(superB.dir[dir],block.data);
+        block.super=superB;
+        disk_write(0,block.data);
+        return dir*DIRENTS_PER_BLOCK;
+        //If it reaches this else it means we want to put it at a specified location
+    }else {
+        int directoryIndex = idx / DIRENTS_PER_BLOCK;
+        idx -= -directoryIndex * DIRENTS_PER_BLOCK;
+        //If the given index is invalid
+        if(superB.dir[directoryIndex]==0)
+            return -1;
+        //Updates the disk
+        disk_read(superB.dir[directoryIndex],block.data);
+        block.dirent[idx]=entry;
+        disk_write(superB.dir[directoryIndex],block.data);
+        return directoryIndex*DIRENTS_PER_BLOCK+idx;
+    }
 }
 
 /****************************************************************/
-
+//Frees a dirent by freeing its blocks and setting the dirent's status to FREE
 void freeDirent(struct fs_dirent *dirent) {
     for (int blk = 0; blk < FBLOCKS; blk++) {
         if (dirent->blocks[blk] != 0)
@@ -219,20 +249,13 @@ int fs_delete(char *name) {
     }
     char fname[FNAMESZ];
     strEncode(fname, name, FNAMESZ);
-    union fs_block block;
-    int directoryIdx = 0;
-    int index = readFileEntry(fname, 0, NULL);
-    if (index == -1)
+    struct fs_dirent dirent;
+    int idx=readFileEntry(fname,0x0,&dirent);
+    //if the file doens't exist
+    if(idx==-1)
         return -1;
-    //Gets dirent to clean
-    while (index > DIRENTS_PER_BLOCK) {
-        directoryIdx++;
-        index -= DIRENTS_PER_BLOCK;
-    }
-    disk_read(superB.dir[directoryIdx], block.data);
-    struct fs_dirent *dirent = &block.dirent[index];
-    freeDirent(dirent);
-    disk_write(superB.dir[directoryIdx], block.data);
+    freeDirent(&dirent);
+    writeFileEntry(idx,dirent);
     return 0;
 }
 
@@ -347,12 +370,10 @@ int fs_mount() {
     for (int dir = 0; dir < MAXDIRSZ; dir++) {
         if (superB.dir[dir] != 0) {
             blockBitMap[superB.dir[dir]] = NOT_FREE;
-            struct fs_dirent *directory;
             disk_read(superB.dir[dir], block.data);
-            directory = block.dirent;
             for (int dirent = 0; dirent < DIRENTS_PER_BLOCK; dirent++) {
-                if (directory[dirent].st != 0x0) {
-                    struct fs_dirent dirBlk = directory[dirent];
+                if (block.dirent[dirent].st != 0x0) {
+                    struct fs_dirent dirBlk = block.dirent[dirent];
                     for (int blk = 0; blk < FBLOCKS; blk++)
                         if (dirBlk.blocks[blk] != 0)
                             blockBitMap[dirBlk.blocks[blk]] = NOT_FREE;
@@ -373,21 +394,15 @@ int fs_read(char *name, char *data, int length, int offset) {
     }
     char fname[FNAMESZ];
     strEncode(fname, name, FNAMESZ);
-    int directoryIdx = 0;//index of directory in superB array
     union fs_block block;//block to store the directory read from the disk
     int readBytes = 0; //counter for number of bytes read
-    int index = readFileEntry(fname, 0, NULL);
-    if (index == -1)
+    struct fs_dirent dirent;
+    int idx=readFileEntry(fname,0x0,&dirent);
+    //If the given file doesn't exist: fail
+    if(idx==-1){
         return -1;
-    //decodes index
-    while (index > DIRENTS_PER_BLOCK) {
-        directoryIdx++;
-        index -= DIRENTS_PER_BLOCK;
     }
-    //gets the dirent for the file
-    disk_read(superB.dir[directoryIdx], block.data);
-    struct fs_dirent dirent = block.dirent[index];
-    //uses the offset to verify the starting block/byte
+    //uses the offset to verify the starting block and byte
     int startingBLk = offset / BLOCKSZ;
     int firstByte = offset - startingBLk * BLOCKSZ;
     //copies the file data to the data buffer
@@ -419,10 +434,9 @@ int fs_write(char *name, char *data, int length, int offset) {
     }
     char fname[FNAMESZ];
     strEncode(fname, name, FNAMESZ);
-    //if dirent with given name doesn't exist, tries to find an empty dirent in the directory. if directory is full, creates a new one
-    union fs_block directory, block;
-    struct fs_dirent *dirent = NULL;
-    int index=readFileEntry(fname,0,NULL),dir;
+    union fs_block block;
+    struct fs_dirent dirent;
+    int index=readFileEntry(fname,0,&dirent),dir;
     //if file already exists
     if(index!=-1){
         dir=0;
@@ -430,58 +444,28 @@ int fs_write(char *name, char *data, int length, int offset) {
             dir++;
             index-=DIRENTS_PER_BLOCK;
         }
-        disk_read(superB.dir[dir],directory.data);
-        dirent=&directory.dirent[index];
         int blocksNeeded=(offset+length)/BLOCKSZ+1;
-        uint16_t *blocks=dirent->blocks;
+        uint16_t *blocks=dirent.blocks;
         //if blocks used by file aren't enough
-        if(blocksNeeded>((dirent->ss/BLOCKSZ)+1)){
-            for (int i =(dirent->ss/BLOCKSZ)+1; i < blocksNeeded; i++) {
+        if(blocksNeeded>((dirent.ss/BLOCKSZ)+1)){
+            for (int i =(dirent.ss/BLOCKSZ)+1; i < blocksNeeded; i++) {
                 blocks[i] = (uint16_t) allocBlock();
-                blockBitMap[blocks[i]] = NOT_FREE;
             }
         }
      //if file doesn't exist, dirent must be created
     }else {
-        //looks for a free dirent in the directories
-        for (dir = 0; dir < MAXDIRSZ && dirent == NULL; dir++) {
-            if (superB.dir[dir] == 0)
-                break;
-            disk_read(superB.dir[dir], directory.data);
-            int i = 0;
-            while (i < DIRENTS_PER_BLOCK && dirent == NULL) {
-                if (directory.dirent[i].st != TEMPTY)
-                    i++;
-                else
-                    dirent = &directory.dirent[i];
-            }
-        }
-        dir--;
-        //if none is found, means we need a new directory
-        if (dirent == NULL) {
-            dir++;
-            union fs_block *newDir = malloc(sizeof(union fs_block));
-            memset(newDir, 0x0, sizeof(union fs_block));
-            directory = *newDir;
-            superB.dir[dir]=(uint16_t )allocBlock();
-            dirent = &directory.dirent[0];
-        }
         //Updates the dirent info
-        dirent->st = TFILE;
-        strcpy(dirent->name, fname);
-        dirent->ss=0x0;
-        dirent->ex = 0x0;
-        memset(dirent->blocks, 0x0, sizeof(uint16_t));
+        dirent.st = TFILE;
+        strcpy(dirent.name, fname);
+        dirent.ss=0x0;
+        dirent.ex = 0x0;
+        memset(dirent.blocks, 0x0, sizeof(uint16_t));
         //Allocates blocks for file
         int blocksNeeded = ((length+offset) / BLOCKSZ) + 1;
-        uint16_t *blocks=dirent->blocks;
         for (int i = 0; i < blocksNeeded; i++) {
-            blocks[i] = (uint16_t) allocBlock();
-            blockBitMap[blocks[i]] = NOT_FREE;
+            dirent.blocks[i] = (uint16_t) allocBlock();
+            blockBitMap[dirent.blocks[i]] = NOT_FREE;
         }
-        //Puts blocks in Dirent
-        for (int blk = 0; blk < blocksNeeded; blk++)
-            dirent->blocks[blk] = blocks[blk];
     }
     //starts writing to blocks
     int bytesWritten = 0;
@@ -495,7 +479,7 @@ int fs_write(char *name, char *data, int length, int offset) {
         bytesWritten++;
     }
     //Updates block in the disk
-    disk_write(dirent->blocks[startingBlock], block.data);
+    disk_write(dirent.blocks[startingBlock], block.data);
     //Writes to remaining blocks
     for (int blk = startingBlock + 1; bytesWritten < length; blk++) {
         memset(&block, 0x0, BLOCKSZ);
@@ -504,14 +488,14 @@ int fs_write(char *name, char *data, int length, int offset) {
             bytesWritten++;
         }
         //Updates current block to disk
-        disk_write(dirent->blocks[blk], block.data);
+        disk_write(dirent.blocks[blk], block.data);
     }
     //If existed a file with the given name, but it was too small for the write we did on it, update its size to the new one
-    if(index!=-1 && dirent->ss < offset+length && offset<dirent->ss)
-        dirent->ss=(uint16_t )offset+length;
+    if(index!=-1 && dirent.ss < offset+length && offset<dirent.ss)
+        dirent.ss= (uint16_t) (offset + length);
     //Else if the size was good enough or it didn't exist
-    else if(dirent->ss < offset+length)
-        dirent->ss+= bytesWritten;
-    disk_write(superB.dir[dir],directory.data);
+    else if(dirent.ss < offset+length)
+        dirent.ss+= bytesWritten;
+    writeFileEntry(index,dirent);
     return bytesWritten; // return writen bytes or -1
 }
