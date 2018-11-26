@@ -209,8 +209,11 @@ int writeFileEntry(int idx, struct fs_dirent entry) {
             }
         }
         //If it reaches this point, it means everything is full. Time to create a new Directory!
+        if(dir==MAXDIRSZ)
+            return -1;
         directory=malloc(sizeof(union fs_block));
         directory->dirent[0]=entry;
+
         superB.dir[dir]= (uint16_t) allocBlock();
         disk_write(superB.dir[dir],block.data);
         block.super=superB;
@@ -467,6 +470,7 @@ int fs_write(char *name, char *data, int length, int offset) {
         blocksNeeded = ((length+offset) / BLOCKSZ) + 1;
         for (int i = 0; i < blocksNeeded; i++) {
              allocatedBlock = allocBlock();
+             //if disk is full: undo the allocation of the blocks
              if(allocatedBlock==-1){
                  for(int j=0;j<i;j++)
                      blockBitMap[dirent.blocks[j]]=FREE;
