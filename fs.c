@@ -234,10 +234,8 @@ int writeFileEntry(int idx, struct fs_dirent entry) {
 /****************************************************************/
 //Frees a dirent by freeing its blocks and setting the dirent's status to FREE
 void freeDirent(struct fs_dirent *dirent) {
-    for (int blk = 0; blk < FBLOCKS; blk++) {
-        if (dirent->blocks[blk] != 0)
+    for (int blk = 0; blk <= dirent->ss/BLOCKSZ; blk++)
             freeBlock(dirent->blocks[blk]);
-    }
     dirent->st = FREE;
 }
 
@@ -276,9 +274,9 @@ void fs_dir() {
         disk_read(superB.dir[dir], block.data);
         directory = block.dirent;
         for (int dirent = 0; dirent < DIRENTS_PER_BLOCK; dirent++) {
-            if (directory[dirent].st != 0x0) {
+            if (directory[dirent].st != FREE) {
                 strDecode(name, directory[dirent].name, FNAMESZ);
-                printf("%u: %s, size: %u bytes\n", dirent, name, directory[dirent].ss);
+                printf("%u: %s, size: %u bytes\n", (unsigned int) (dir * DIRENTS_PER_BLOCK + dirent), name, directory[dirent].ss);
 
             }
         }
@@ -404,21 +402,17 @@ int fs_read(char *name, char *data, int length, int offset) {
     }
     //uses the offset to verify the starting block and byte
     int startingBLk = offset / BLOCKSZ;
-    int firstByte = offset - startingBLk * BLOCKSZ;
+    int byte = offset - startingBLk * BLOCKSZ;
     //copies the file data to the data buffer
-    //the first block must be done separately because of the offset parameter
     disk_read(dirent.blocks[startingBLk], block.data);
-    for (int byte = firstByte; byte < BLOCKSZ && readBytes < length && offset + readBytes < dirent.ss; byte++) {
-        data[readBytes] = block.data[byte];
-        readBytes++;
-    }
-    for (int blk = startingBLk + 1; blk < FBLOCKS && readBytes < length && offset + readBytes < dirent.ss; blk++) {
+    for (int blk = startingBLk; blk < FBLOCKS && readBytes < length && offset + readBytes < dirent.ss; blk++) {
         if (dirent.blocks[blk] != 0) {
             disk_read(dirent.blocks[blk], block.data);
-            for (int byte = 0; byte < BLOCKSZ && readBytes < length && offset + readBytes < dirent.ss; byte++) {
+            for (; byte < BLOCKSZ && readBytes < length && offset + readBytes < dirent.ss; byte++) {
                 data[readBytes] = block.data[byte];
                 readBytes++;
             }
+            byte=0;
         }
     }
     return readBytes;
@@ -433,23 +427,32 @@ int fs_write(char *name, char *data, int length, int offset) {
         return -1;
     }
     char fname[FNAMESZ];
-    strEncode(fname, name, FNAMESZ);
     union fs_block block;
+    strEncode(fname, name, FNAMESZ);
     struct fs_dirent dirent;
-    int index=readFileEntry(fname,0,&dirent),dir;
+    int index=readFileEntry(fname,0,&dirent),dir,blocksNeeded,allocatedBlock;
     //if file already exists
     if(index!=-1){
+        int numDirentBlocks=(dirent.ss/BLOCKSZ) +1;
         dir=0;
         while(index>DIRENTS_PER_BLOCK) {
             dir++;
             index-=DIRENTS_PER_BLOCK;
         }
-        int blocksNeeded=(offset+length)/BLOCKSZ+1;
+        blocksNeeded=(offset+length)/BLOCKSZ+1;
         uint16_t *blocks=dirent.blocks;
         //if blocks used by file aren't enough
-        if(blocksNeeded>((dirent.ss/BLOCKSZ)+1)){
-            for (int i =(dirent.ss/BLOCKSZ)+1; i < blocksNeeded; i++) {
-                blocks[i] = (uint16_t) allocBlock();
+        if(blocksNeeded>numDirentBlocks){
+            for (int i =numDirentBlocks; i < blocksNeeded; i++) {
+                allocatedBlock=allocBlock();
+                if(allocatedBlock==-1){
+                    for(int j=((dirent.ss/BLOCKSZ)+1);j<i;j++) {
+                        blockBitMap[blocks[j]] = FREE;
+                        dirent.blocks[j]=FREE;
+                    }
+                    return -1;
+                }
+                dirent.blocks[i]= (uint16_t) allocatedBlock;
             }
         }
      //if file doesn't exist, dirent must be created
@@ -461,32 +464,32 @@ int fs_write(char *name, char *data, int length, int offset) {
         dirent.ex = 0x0;
         memset(dirent.blocks, 0x0, sizeof(uint16_t));
         //Allocates blocks for file
-        int blocksNeeded = ((length+offset) / BLOCKSZ) + 1;
+        blocksNeeded = ((length+offset) / BLOCKSZ) + 1;
         for (int i = 0; i < blocksNeeded; i++) {
-            dirent.blocks[i] = (uint16_t) allocBlock();
-            blockBitMap[dirent.blocks[i]] = NOT_FREE;
+             allocatedBlock = allocBlock();
+             if(allocatedBlock==-1){
+                 for(int j=0;j<i;j++)
+                     blockBitMap[dirent.blocks[j]]=FREE;
+                 return -1;
+             }
+             dirent.blocks[i]=(uint16_t) allocatedBlock;
         }
     }
     //starts writing to blocks
     int bytesWritten = 0;
     int startingBlock = offset / BLOCKSZ;
-    int startingByte = offset - startingBlock * BLOCKSZ;
-    //clears block
-    memset(&block, 0x0, BLOCKSZ);
-    //Writes first block with inserted offset
-    for (int byte = startingByte; byte < BLOCKSZ && bytesWritten < length; byte++) {
-        block.data[byte] = data[bytesWritten];
-        bytesWritten++;
-    }
-    //Updates block in the disk
-    disk_write(dirent.blocks[startingBlock], block.data);
+    int byte = offset - startingBlock * BLOCKSZ;
     //Writes to remaining blocks
-    for (int blk = startingBlock + 1; bytesWritten < length; blk++) {
-        memset(&block, 0x0, BLOCKSZ);
-        for (int byte = 0; byte < BLOCKSZ && bytesWritten < length; byte++) {
+    for (int blk = startingBlock; bytesWritten < length; blk++) {
+        if(blockBitMap[dirent.blocks[blk]]==FREE)
+            memset(&block,0x0, sizeof(union fs_block));
+        else
+            disk_read(dirent.blocks[blk],block.data);
+        for (; byte < BLOCKSZ && bytesWritten < length; byte++) {
             block.data[byte] = data[bytesWritten];
             bytesWritten++;
         }
+        byte=0;
         //Updates current block to disk
         disk_write(dirent.blocks[blk], block.data);
     }
