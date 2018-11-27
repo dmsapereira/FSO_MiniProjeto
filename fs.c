@@ -423,6 +423,7 @@ int fs_read(char *name, char *data, int length, int offset) {
         }
     }
     return readBytes;
+
 }
 
 /****************************************************************/
@@ -449,17 +450,13 @@ int fs_write(char *name, char *data, int length, int offset) {
             index-=DIRENTS_PER_BLOCK;
         }
         blocksNeeded=(offset+length)/BLOCKSZ+1;
-        uint16_t *blocks=dirent.blocks;
         //if blocks used by file aren't enough
         if(blocksNeeded>numDirentBlocks){
             for (int i =numDirentBlocks; i < blocksNeeded; i++) {
                 allocatedBlock=allocBlock();
                 if(allocatedBlock==-1){
-                    for(int j=numDirentBlocks;j<i;j++) {
-                        blockBitMap[blocks[j]] = FREE;
-                        dirent.blocks[j]=FREE;
-                    }
-                    return -1;
+                    blocksNeeded=i;
+                    break;
                 }
                 dirent.blocks[i]= (uint16_t) allocatedBlock;
             }
@@ -482,9 +479,8 @@ int fs_write(char *name, char *data, int length, int offset) {
              allocatedBlock = allocBlock();
              //if disk is full: undo the allocation of the blocks
              if(allocatedBlock==-1){
-                 for(int j=0;j<i;j++)
-                     blockBitMap[dirent.blocks[j]]=FREE;
-                 return -1;
+                 blocksNeeded=i;
+                 break;
              }
              dirent.blocks[i]=(uint16_t) allocatedBlock;
         }
@@ -494,7 +490,7 @@ int fs_write(char *name, char *data, int length, int offset) {
     int startingBlock = offset / BLOCKSZ;
     int byte = offset - startingBlock * BLOCKSZ;
     //Writes to remaining blocks
-    for (int blk = startingBlock; bytesWritten < length; blk++) {
+    for (int blk = startingBlock; bytesWritten < length && bytesWritten<blocksNeeded*BLOCKSZ; blk++) {
         if(blockBitMap[dirent.blocks[blk]]==FREE)
             memset(&block,0x0, sizeof(union fs_block));
         else
@@ -515,4 +511,5 @@ int fs_write(char *name, char *data, int length, int offset) {
         dirent.ss+= bytesWritten;
     writeFileEntry(index,dirent);
     return bytesWritten; // return writen bytes or -1
+
 }
