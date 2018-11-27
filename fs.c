@@ -196,7 +196,7 @@ int writeFileEntry(int idx, struct fs_dirent entry) {
         union fs_block *directory;
         //Iterates de directories
         for(;dir<MAXDIRSZ;dir++){
-            if(superB.dir[dir]==0)
+            if(superB.dir[dir]==0x0)
                 break;
             disk_read(superB.dir[dir],block.data);
             //Iterates the Dirents in the Directories looking for a free one
@@ -213,16 +213,16 @@ int writeFileEntry(int idx, struct fs_dirent entry) {
             return -1;
         directory=malloc(sizeof(union fs_block));
         directory->dirent[0]=entry;
-
         superB.dir[dir]= (uint16_t) allocBlock();
-        disk_write(superB.dir[dir],block.data);
+        disk_write(superB.dir[dir],directory->data);
+        free(directory);
         block.super=superB;
         disk_write(0,block.data);
         return dir*DIRENTS_PER_BLOCK;
         //If it reaches this else it means we want to put it at a specified location
     }else {
         int directoryIndex = idx / DIRENTS_PER_BLOCK;
-        idx -= -directoryIndex * DIRENTS_PER_BLOCK;
+        idx = idx%DIRENTS_PER_BLOCK;
         //If the given index is invalid
         if(superB.dir[directoryIndex]==0)
             return -1;
@@ -237,9 +237,13 @@ int writeFileEntry(int idx, struct fs_dirent entry) {
 /****************************************************************/
 //Frees a dirent by freeing its blocks and setting the dirent's status to FREE
 void freeDirent(struct fs_dirent *dirent) {
-    for (int blk = 0; blk <= dirent->ss/BLOCKSZ; blk++)
+    if(dirent->ss!=0x0) {
+        for (int blk = 0; blk <= dirent->ss / BLOCKSZ; blk++)
             freeBlock(dirent->blocks[blk]);
+    }
     dirent->st = FREE;
+
+
 }
 
 int fs_delete(char *name) {
@@ -437,6 +441,8 @@ int fs_write(char *name, char *data, int length, int offset) {
     //if file already exists
     if(index!=-1){
         int numDirentBlocks=(dirent.ss/BLOCKSZ) +1;
+        if(dirent.ss==0x0)
+            numDirentBlocks=0;
         dir=0;
         while(index>DIRENTS_PER_BLOCK) {
             dir++;
@@ -449,7 +455,7 @@ int fs_write(char *name, char *data, int length, int offset) {
             for (int i =numDirentBlocks; i < blocksNeeded; i++) {
                 allocatedBlock=allocBlock();
                 if(allocatedBlock==-1){
-                    for(int j=((dirent.ss/BLOCKSZ)+1);j<i;j++) {
+                    for(int j=numDirentBlocks;j<i;j++) {
                         blockBitMap[blocks[j]] = FREE;
                         dirent.blocks[j]=FREE;
                     }
@@ -466,6 +472,10 @@ int fs_write(char *name, char *data, int length, int offset) {
         dirent.ss=0x0;
         dirent.ex = 0x0;
         memset(dirent.blocks, 0x0, sizeof(uint16_t));
+        if(length==0) {
+            writeFileEntry(-1, dirent);
+            return 0x0;
+        }
         //Allocates blocks for file
         blocksNeeded = ((length+offset) / BLOCKSZ) + 1;
         for (int i = 0; i < blocksNeeded; i++) {
